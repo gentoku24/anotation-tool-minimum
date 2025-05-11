@@ -1,0 +1,19 @@
+{
+  "classes": [
+    {
+      "id": "car_01",
+      "label": "car",
+      "color": [255, 0, 0]
+    },
+    {
+      "id": "pedestrian_01",
+      "label": "pedestrian",
+      "color": [0, 255, 0]
+    },
+    {
+      "id": "bicycle_01",
+      "label": "bicycle",
+      "color": [0, 0, 255]
+    }
+  ]
+} 
