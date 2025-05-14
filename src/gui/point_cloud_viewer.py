@@ -1,10 +1,11 @@
 import numpy as np
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QSizePolicy
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
 
 import sys
 import os
+import math
 
 # 親ディレクトリをパスに追加
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,9 +32,11 @@ class PointCloudViewer(QWidget):
         
         # 点群データ
         self.point_cloud_xyz = None
+        self.transformed_points = None
         
         # アノテーションデータ
         self.bounding_boxes = {}  # id -> BoundingBox3D
+        self.transformed_boxes = {}  # id -> 変換後の頂点座標リスト
         
         # 選択状態
         self.selected_box_id = None
@@ -46,7 +49,25 @@ class PointCloudViewer(QWidget):
         
         # サイズポリシー
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-    
+
+        # 2D表示用のスケール・オフセット（平行移動）
+        self.scale = 1.0
+        self.offset = QPointF(0, 0)
+        self.last_mouse_pos = None
+        self.is_panning = False
+        self.is_rotating = False
+        
+        # 回転角度（ラジアン）
+        self.rotation_x = 0.0  # X軸周りの回転
+        self.rotation_y = 0.0  # Y軸周りの回転
+        self.rotation_z = 0.0  # Z軸周りの回転
+        
+        # マウス操作の感度
+        self.rotation_sensitivity = 0.01
+        
+        # 現在の回転行列
+        self.current_rotation_matrix = np.eye(3)
+
     def paintEvent(self, event):
         """描画イベント"""
         painter = QPainter(self)
@@ -70,9 +91,70 @@ class PointCloudViewer(QWidget):
         font.setPointSize(10)
         painter.setFont(font)
         painter.drawText(10, 20, f"点群データ: {len(self.point_cloud_xyz)}点")
+        painter.drawText(10, 40, f"回転角度: X={math.degrees(self.rotation_x):.1f}°, Y={math.degrees(self.rotation_y):.1f}°, Z={math.degrees(self.rotation_z):.1f}°")
+        
+        if self.transformed_points is not None:
+            points = self.transformed_points
+            if len(points) > 0:
+                # 点群の中心をウィンドウ中央に合わせる
+                min_xy = np.min(points[:, :2], axis=0)
+                max_xy = np.max(points[:, :2], axis=0)
+                center_xy = (min_xy + max_xy) / 2
+                widget_center = QPointF(self.width() / 2, self.height() / 2)
+                
+                # スケール自動調整（ウィンドウに収まるように）
+                range_xy = max(max_xy - min_xy)
+                if range_xy > 0:
+                    scale = 0.8 * min(self.width(), self.height()) / range_xy
+                else:
+                    scale = 1.0
+                scale *= self.scale
+                
+                # 点を描画
+                painter.setPen(QPen(Qt.green, 2))
+                for pt in points:
+                    x, y = pt[0], pt[1]
+                    # 2D座標変換
+                    screen_x = (x - center_xy[0]) * scale + widget_center.x() + self.offset.x()
+                    screen_y = (y - center_xy[1]) * scale + widget_center.y() + self.offset.y()
+                    painter.drawPoint(int(screen_x), int(screen_y))
+                
+                # バウンディングボックスを描画
+                for bbox_id, box_vertices in self.transformed_boxes.items():
+                    bbox = self.bounding_boxes[bbox_id]
+                    color = QColor(*bbox.class_color)
+                    
+                    # 選択状態に応じてペンを設定
+                    if bbox_id == self.selected_box_id:
+                        painter.setPen(QPen(color, 2, Qt.SolidLine))
+                    else:
+                        painter.setPen(QPen(color, 1, Qt.SolidLine))
+                    
+                    # 頂点を2D座標に変換
+                    screen_vertices = []
+                    for vertex in box_vertices:
+                        screen_x = (vertex[0] - center_xy[0]) * scale + widget_center.x() + self.offset.x()
+                        screen_y = (vertex[1] - center_xy[1]) * scale + widget_center.y() + self.offset.y()
+                        screen_vertices.append((int(screen_x), int(screen_y)))
+                    
+                    # 各辺を描画（立方体の12本の辺）
+                    # 底面の4辺
+                    for i in range(4):
+                        painter.drawLine(screen_vertices[i][0], screen_vertices[i][1], 
+                                        screen_vertices[(i+1)%4][0], screen_vertices[(i+1)%4][1])
+                    
+                    # 上面の4辺
+                    for i in range(4):
+                        painter.drawLine(screen_vertices[i+4][0], screen_vertices[i+4][1], 
+                                        screen_vertices[(i+1)%4+4][0], screen_vertices[(i+1)%4+4][1])
+                    
+                    # 側面の4辺
+                    for i in range(4):
+                        painter.drawLine(screen_vertices[i][0], screen_vertices[i][1], 
+                                        screen_vertices[i+4][0], screen_vertices[i+4][1])
         
         # バウンディングボックス情報
-        y_pos = 40
+        y_pos = 60
         for bbox_id, bbox in self.bounding_boxes.items():
             color = QColor(*bbox.class_color)
             is_selected = bbox_id == self.selected_box_id
@@ -84,29 +166,133 @@ class PointCloudViewer(QWidget):
             else:
                 painter.setPen(QPen(color))
                 font.setBold(False)
-            
             painter.setFont(font)
             painter.drawText(10, y_pos, f"{bbox.class_label}: {bbox.center} サイズ: {bbox.size}")
             y_pos += 20
-    
+
+    def apply_rotation(self):
+        """回転を適用して点群を変換"""
+        if self.point_cloud_xyz is None:
+            return
+        
+        # 回転行列を計算
+        # X軸周りの回転
+        rx_matrix = np.array([
+            [1, 0, 0],
+            [0, np.cos(self.rotation_x), -np.sin(self.rotation_x)],
+            [0, np.sin(self.rotation_x), np.cos(self.rotation_x)]
+        ])
+        
+        # Y軸周りの回転
+        ry_matrix = np.array([
+            [np.cos(self.rotation_y), 0, np.sin(self.rotation_y)],
+            [0, 1, 0],
+            [-np.sin(self.rotation_y), 0, np.cos(self.rotation_y)]
+        ])
+        
+        # Z軸周りの回転
+        rz_matrix = np.array([
+            [np.cos(self.rotation_z), -np.sin(self.rotation_z), 0],
+            [np.sin(self.rotation_z), np.cos(self.rotation_z), 0],
+            [0, 0, 1]
+        ])
+        
+        # 回転行列を合成（Z→Y→Xの順に適用）
+        self.current_rotation_matrix = rx_matrix @ ry_matrix @ rz_matrix
+        
+        # 点群に回転を適用
+        self.transformed_points = self.point_cloud_xyz @ self.current_rotation_matrix.T
+        
+        # バウンディングボックスにも回転を適用
+        self.transform_bounding_boxes()
+        
+        # 再描画
+        self.update()
+
+    def transform_bounding_boxes(self):
+        """バウンディングボックスに回転を適用"""
+        self.transformed_boxes = {}
+        
+        for bbox_id, bbox in self.bounding_boxes.items():
+            # バウンディングボックスの8つの頂点を計算
+            center = np.array(bbox.center)
+            size = np.array(bbox.size) / 2  # 中心からの距離なので半分
+            
+            # 8つの頂点の座標を計算（中心からのオフセット）
+            vertices = []
+            for dx in [-1, 1]:
+                for dy in [-1, 1]:
+                    for dz in [-1, 1]:
+                        offset = np.array([dx * size[0], dy * size[1], dz * size[2]])
+                        vertices.append(center + offset)
+            
+            # 回転を適用
+            transformed_vertices = np.array(vertices) @ self.current_rotation_matrix.T
+            
+            # 変換後の頂点を保存
+            self.transformed_boxes[bbox_id] = transformed_vertices
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_panning = True
+            self.is_rotating = False
+            self.last_mouse_pos = event.pos()
+        elif event.button() == Qt.RightButton:
+            self.is_rotating = True
+            self.is_panning = False
+            self.last_mouse_pos = event.pos()
+
+    def mouseMoveEvent(self, event):
+        if self.last_mouse_pos is None:
+            return
+            
+        if self.is_panning:
+            # 平行移動
+            delta = event.pos() - self.last_mouse_pos
+            self.offset += delta
+            self.last_mouse_pos = event.pos()
+            self.update()
+        elif self.is_rotating:
+            # 回転
+            delta = event.pos() - self.last_mouse_pos
+            # マウスのX移動→Y軸周り回転、Y移動→X軸周り回転
+            self.rotation_y += delta.x() * self.rotation_sensitivity
+            self.rotation_x += delta.y() * self.rotation_sensitivity
+            self.last_mouse_pos = event.pos()
+            self.apply_rotation()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_panning = False
+            self.last_mouse_pos = None
+        elif event.button() == Qt.RightButton:
+            self.is_rotating = False
+            self.last_mouse_pos = None
+
+    def wheelEvent(self, event):
+        # マウスホイールで拡大縮小
+        angle = event.angleDelta().y()
+        factor = 1.15 if angle > 0 else 0.85
+        self.scale *= factor
+        self.update()
+
     def load_point_cloud(self, _, xyz):
         """点群データを読み込む"""
         if xyz is None:
             return False
-        
-        # 点群データを設定
         self.point_cloud_xyz = xyz
-        
-        # 再描画
+        self.transformed_points = xyz.copy()  # 初期状態では変換なし
         self.update()
-        
         return True
-    
+
     def add_bounding_box(self, bbox: BoundingBox3D) -> bool:
         """バウンディングボックスを追加"""
         try:
             # 保存
             self.bounding_boxes[bbox.id] = bbox
+            
+            # 変換を適用
+            self.transform_bounding_boxes()
             
             # 再描画
             self.update()
@@ -123,6 +309,8 @@ class PointCloudViewer(QWidget):
         try:
             # 管理リストから削除
             del self.bounding_boxes[bbox_id]
+            if bbox_id in self.transformed_boxes:
+                del self.transformed_boxes[bbox_id]
             
             # 選択状態をクリア
             if self.selected_box_id == bbox_id:
@@ -154,6 +342,7 @@ class PointCloudViewer(QWidget):
         """全てのバウンディングボックスをクリア"""
         # 管理リストをクリア
         self.bounding_boxes = {}
+        self.transformed_boxes = {}
         
         # 選択状態をクリア
         self.selected_box_id = None
@@ -169,7 +358,9 @@ class PointCloudViewer(QWidget):
     
     def update_bounding_box(self, bbox: BoundingBox3D) -> bool:
         """バウンディングボックスを更新"""
-        return self.add_bounding_box(bbox)  # add_bounding_boxは既存のIDなら更新処理も行う
+        result = self.add_bounding_box(bbox)  # add_bounding_boxは既存のIDなら更新処理も行う
+        self.transform_bounding_boxes()  # 変換を適用
+        return result
     
     def close_viewer(self):
         """ビューアを閉じる"""
