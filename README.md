@@ -20,7 +20,7 @@ pip install -r requirements.txt
 ## 使用方法
 
 ```
-python src/main.py
+python -m src.main
 ```
 
 ## データ構造
