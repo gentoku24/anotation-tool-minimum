@@ -218,15 +218,58 @@ class PointCloudViewer(QWidget):
             center = np.array(bbox.center)
             size = np.array(bbox.size) / 2  # 中心からの距離なので半分
             
-            # 8つの頂点の座標を計算（中心からのオフセット）
-            vertices = []
-            for dx in [-1, 1]:
-                for dy in [-1, 1]:
-                    for dz in [-1, 1]:
-                        offset = np.array([dx * size[0], dy * size[1], dz * size[2]])
-                        vertices.append(center + offset)
+            # バウンディングボックス自体の回転（ラジアンに変換）
+            box_rotation = np.array(bbox.rotation) * (np.pi / 180.0)
             
-            # 回転を適用
+            # バウンディングボックスのローカル回転行列を作成
+            # X軸周りの回転
+            rx_matrix = np.array([
+                [1, 0, 0],
+                [0, np.cos(box_rotation[0]), -np.sin(box_rotation[0])],
+                [0, np.sin(box_rotation[0]), np.cos(box_rotation[0])]
+            ])
+            
+            # Y軸周りの回転
+            ry_matrix = np.array([
+                [np.cos(box_rotation[1]), 0, np.sin(box_rotation[1])],
+                [0, 1, 0],
+                [-np.sin(box_rotation[1]), 0, np.cos(box_rotation[1])]
+            ])
+            
+            # Z軸周りの回転
+            rz_matrix = np.array([
+                [np.cos(box_rotation[2]), -np.sin(box_rotation[2]), 0],
+                [np.sin(box_rotation[2]), np.cos(box_rotation[2]), 0],
+                [0, 0, 1]
+            ])
+            
+            # 回転行列を合成（Z→Y→Xの順に適用）
+            box_rotation_matrix = rx_matrix @ ry_matrix @ rz_matrix
+            
+            # 頂点の順序を明示的に定義（立方体の8つの頂点）
+            # 順序: [左下前, 右下前, 右上前, 左上前, 左下後, 右下後, 右上後, 左上後]
+            corners = [
+                [-1, -1, -1],  # 左下前
+                [1, -1, -1],   # 右下前
+                [1, 1, -1],    # 右上前
+                [-1, 1, -1],   # 左上前
+                [-1, -1, 1],   # 左下後
+                [1, -1, 1],    # 右下後
+                [1, 1, 1],     # 右上後
+                [-1, 1, 1]     # 左上後
+            ]
+            
+            # 8つの頂点の座標を計算（回転を含む）
+            vertices = []
+            for corner in corners:
+                # サイズに合わせて拡大
+                local_offset = np.array([corner[0] * size[0], corner[1] * size[1], corner[2] * size[2]])
+                # ボックスの回転を適用
+                rotated_offset = local_offset @ box_rotation_matrix.T
+                # 中心位置を加算
+                vertices.append(center + rotated_offset)
+            
+            # ビューワーの回転を適用
             transformed_vertices = np.array(vertices) @ self.current_rotation_matrix.T
             
             # 変換後の頂点を保存
@@ -255,9 +298,17 @@ class PointCloudViewer(QWidget):
         elif self.is_rotating:
             # 回転
             delta = event.pos() - self.last_mouse_pos
-            # マウスのX移動→Y軸周り回転、Y移動→X軸周り回転
-            self.rotation_y += delta.x() * self.rotation_sensitivity
-            self.rotation_x += delta.y() * self.rotation_sensitivity
+            
+            # SHIFTキーが押されている場合はZ軸周り回転
+            modifiers = event.modifiers()
+            if modifiers & Qt.ShiftModifier:
+                # X移動をZ回転に割り当て
+                self.rotation_z += delta.x() * self.rotation_sensitivity
+            else:
+                # 通常の回転: マウスのX移動→Y軸周り回転、Y移動→X軸周り回転
+                self.rotation_y += delta.x() * self.rotation_sensitivity
+                self.rotation_x += delta.y() * self.rotation_sensitivity
+                
             self.last_mouse_pos = event.pos()
             self.apply_rotation()
 
