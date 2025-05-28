@@ -38,6 +38,16 @@ docker-compose.ymlファイル内の以下の行のコメントを入れ替え�
 image: gentoku24/anotation-tool:latest
 ```
 
+または、特定バージョンを使用する場合：
+```
+# ローカルビルドの場合
+# build: .
+# Docker Hubからのプルを使用する場合はこちらを有効化
+# image: gentoku24/anotation-tool:latest
+# 特定バージョンを使用する場合はこちらを有効化
+image: gentoku24/anotation-tool:v1.0-20250528
+```
+
 その後、以下のコマンドを実行:
 ```
 docker-compose up
@@ -52,10 +62,15 @@ python -m src.main
 
 ### Dockerでの実行
 Windowsの場合：
-1. X serverを起動（VcXsrvの場合、「-ac」オプションを付けて起動）
+1. X serverを起動（VcXsrvの場合、「-ac -nowgl」オプションを付けて起動）
 2. 以下のコマンドで実行
 ```
 docker-compose up
+```
+
+または、提供されているバッチファイルを使用：
+```
+run_docker_windows.bat
 ```
 
 ## データ構造
