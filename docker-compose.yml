@@ -2,7 +2,10 @@ version: '3.8'
 
 services:
   app:
+    # ローカルビルドの場合
     build: .
+    # Docker Hubからのプルを使用する場合はこちらを有効化
+    # image: gentoku24/anotation-tool:latest
     volumes:
       - ./:/app
       - ./data:/app/data

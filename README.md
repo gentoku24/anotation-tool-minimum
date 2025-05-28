@@ -21,9 +21,25 @@ pip install -r requirements.txt
 ### Dockerを使用する場合
 1. Dockerをインストール
 2. Windowsの場合はX serverをインストール（VcXsrv等）
-3. 以下のコマンドでビルドと実行
+3. 以下のいずれかの方法で実行:
+
+#### ローカルでビルドする場合
 ```
 docker-compose build
+docker-compose up
+```
+
+#### Docker Hubからプルする場合
+docker-compose.ymlファイル内の以下の行のコメントを入れ替えます:
+```
+# ローカルビルドの場合
+# build: .
+# Docker Hubからのプルを使用する場合はこちらを有効化
+image: gentoku24/anotation-tool:latest
+```
+
+その後、以下のコマンドを実行:
+```
 docker-compose up
 ```
 
