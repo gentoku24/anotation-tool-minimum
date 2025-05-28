@@ -11,16 +11,35 @@
 
 ## インストール方法
 
+### 通常のインストール
 1. リポジトリをクローン
 2. 依存パッケージのインストール
 ```
 pip install -r requirements.txt
 ```
 
+### Dockerを使用する場合
+1. Dockerをインストール
+2. Windowsの場合はX serverをインストール（VcXsrv等）
+3. 以下のコマンドでビルドと実行
+```
+docker-compose build
+docker-compose up
+```
+
 ## 使用方法
 
+### 通常の実行
 ```
 python -m src.main
+```
+
+### Dockerでの実行
+Windowsの場合：
+1. X serverを起動（VcXsrvの場合、「-ac」オプションを付けて起動）
+2. 以下のコマンドで実行
+```
+docker-compose up
 ```
 
 ## データ構造
