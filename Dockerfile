@@ -21,6 +21,14 @@ RUN apt-get update && apt-get install -y \
     libx11-xcb1 \
     libxcb1 \
     libsm6 \
+    # OpenGL関連のライブラリを追加
+    libegl1 \
+    libegl1-mesa \
+    libgl1-mesa-dri \
+    libglu1-mesa \
+    libglx-mesa0 \
+    libglx0 \
+    libglvnd0 \
     && rm -rf /var/lib/apt/lists/*
 
 # 依存関係ファイルをコピー
@@ -37,6 +45,10 @@ RUN mkdir -p data class_labels logs
 
 # PYTHONPATHを設定
 ENV PYTHONPATH=/app
+
+# PySide6のOpenGL設定
+ENV QT_QPA_PLATFORM=xcb
+ENV QT_XCB_GL_INTEGRATION=none
 
 # コンテナ起動時のコマンド
 CMD ["python", "src/main.py"] 
