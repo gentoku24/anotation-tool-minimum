@@ -1,6 +1,7 @@
 import json
 import os
 import numpy as np
+import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -9,14 +10,16 @@ class BoundingBox3D:
     
     def __init__(self, center: List[float], size: List[float], rotation: List[float], 
                  id: str = None, class_id: str = None, class_label: str = None, 
-                 class_color: List[int] = None):
-        self.id = id or datetime.now().strftime("%Y%m%d%H%M%S%f")
+                 class_color: List[int] = None, track_id: str = None):
+        # タイムスタンプと一意なUUIDを組み合わせてより確実にユニークなIDを生成
+        self.id = id or f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}-{str(uuid.uuid4())[:8]}"
         self.class_id = class_id
         self.class_label = class_label
         self.class_color = class_color or [255, 255, 255]  # デフォルトは白
         self.center = center  # [x, y, z]
         self.size = size  # [width, length, height]
         self.rotation = rotation  # [rx, ry, rz] - 各軸周りの回転角度（度数法）
+        self.track_id = track_id or self.id  # デフォルトはボックスIDと同じ
     
     def to_dict(self) -> Dict[str, Any]:
         """オブジェクトを辞書形式に変換"""
@@ -27,7 +30,8 @@ class BoundingBox3D:
             "class_color": self.class_color,
             "center": self.center,
             "size": self.size,
-            "rotation": self.rotation
+            "rotation": self.rotation,
+            "track_id": self.track_id
         }
     
     @classmethod
@@ -40,7 +44,8 @@ class BoundingBox3D:
             class_color=data.get("class_color"),
             center=data.get("center"),
             size=data.get("size"),
-            rotation=data.get("rotation")
+            rotation=data.get("rotation"),
+            track_id=data.get("track_id")
         )
 
 class ClassLabel:
@@ -138,6 +143,18 @@ class AnnotationManager:
         """全てのアノテーションを取得"""
         return self.annotations
     
+    def get_annotations_by_track(self, track_id: str) -> List[BoundingBox3D]:
+        """指定のトラックIDに属するアノテーションを取得"""
+        return [annotation for annotation in self.annotations if annotation.track_id == track_id]
+    
+    def set_frame_id(self, frame_id: str):
+        """フレームIDを設定"""
+        self.frame_id = frame_id
+    
+    def get_frame_id(self) -> str:
+        """現在のフレームIDを取得"""
+        return self.frame_id
+    
     def save_to_file(self, file_path: str) -> bool:
         """アノテーションをJSONファイルに保存"""
         data = {
@@ -146,6 +163,8 @@ class AnnotationManager:
         }
         
         try:
+            # ディレクトリが存在しない場合は作成
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
             with open(file_path, 'w') as f:
                 json.dump(data, f, indent=2)
             return True
