@@ -15,10 +15,11 @@ from PySide6.QtGui import QIcon, QKeySequence, QAction
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models import BoundingBox3D, ClassLabel, AnnotationManager, ClassManager
-from src.utils import load_point_cloud
+from src.utils import load_point_cloud, load_image, get_image_file_path
 from src.coordinate_transform import enable_transform, is_transform_enabled, get_available_systems, get_system_info
 from src.gui.point_cloud_viewer import PointCloudViewer
 from src.gui.fixed_view_viewer import FixedViewViewer, ViewType
+from src.gui.image_viewer import ImageViewer
 from src.frame_manager import FrameManager
 from src.tracking_manager import TrackingManager
 
@@ -62,7 +63,7 @@ class MainWindow(QMainWindow):
         # ツールバー
         self._create_toolbar()
         
-        # メインコンテンツのスプリッター（横方向の3分割）
+        # メインコンテンツのスプリッター（横方向の分割）
         main_splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(main_splitter)
         
@@ -76,12 +77,22 @@ class MainWindow(QMainWindow):
         self.point_cloud_viewer.box_created.connect(self._on_bbox_created)
         main_splitter.addWidget(self.point_cloud_viewer)
         
-        # 右側のマルチビューパネル
-        multi_view_panel = self._create_multi_view_panel()
-        main_splitter.addWidget(multi_view_panel)
+        # 右側のパネル（画像ビューアとマルチビュー）
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        main_splitter.addWidget(right_panel)
         
-        # スプリッターの初期サイズ比率設定（左:中央:右 = 2:5:3）
-        main_splitter.setSizes([200, 500, 300])
+        # 右上の画像ビューアー
+        self.image_viewer = ImageViewer()
+        right_layout.addWidget(self.image_viewer, 1)  # 1の重みで追加
+        
+        # 右下のマルチビューパネル
+        multi_view_panel = self._create_multi_view_panel()
+        right_layout.addWidget(multi_view_panel, 2)  # 2の重みで追加（マルチビューの方が大きく表示）
+        
+        # メインスプリッターの初期サイズ比率設定（左:中央:右 = 1:3:2）
+        main_splitter.setSizes([100, 300, 200])
         
         # タイムラインコントロールパネル
         timeline_panel = self._create_timeline_panel()
@@ -274,56 +285,59 @@ class MainWindow(QMainWindow):
         self.point_cloud_xyz, self.point_cloud = load_point_cloud(point_cloud_file)
         
         if self.point_cloud_xyz is None:
+            error_msg = f"Failed to load point cloud file: {point_cloud_file}"
             QMessageBox.critical(
                 self,
                 "Load Error",
-                f"Failed to load point cloud file: {point_cloud_file}"
+                error_msg
             )
             return False
         
         # ビューアに点群をセット
         if not self.point_cloud_viewer.load_point_cloud(self.point_cloud, self.point_cloud_xyz):
-            QMessageBox.critical(self, "Error", "Failed to display point cloud.")
+            error_msg = "Failed to display point cloud in viewer."
+            QMessageBox.critical(
+                self,
+                "Display Error",
+                error_msg
+            )
             return False
         
-        # 現在のファイルパスを保存
-        self.current_file_path = point_cloud_file
-        file_name = os.path.basename(point_cloud_file)
-        
-        # フレームIDを取得
-        current_frame_id = self.frame_manager.get_current_frame_id()
-        self.setWindowTitle(f"3D Annotation Tool - Frame {current_frame_id} - {file_name}")
-        
-        # フレームラベルを更新
-        frame_count = self.frame_manager.get_frame_count()
-        self.frame_label.setText(f"Frame {current_frame_id} / {frame_count}")
-        
-        # 対応するアノテーションファイルをチェック
-        annotation_file = self.frame_manager.get_annotation_file_path()
-        
-        if os.path.exists(annotation_file):
-            # アノテーションファイルが存在する場合は読み込む
-            self.annotation_manager = AnnotationManager.load_from_file(annotation_file)
-            
-            # ビューアにアノテーションを表示
-            self._display_all_annotations()
-            
-            # リストを更新
-            self._update_annotation_list()
+        # 画像ファイルを読み込み
+        image_file = get_image_file_path(point_cloud_file)
+        if image_file and os.path.exists(image_file):
+            image = load_image(image_file)
+            if image:
+                self.image_viewer.load_image(image)
+                self.statusBar.showMessage(f"Loaded image from: {image_file}", 3000)
         else:
-            # 新しいアノテーションマネージャを作成
-            self.annotation_manager = AnnotationManager(frame_id=current_frame_id)
-            
-            # ビューアのアノテーションをクリア
-            self.point_cloud_viewer.clear_all_bounding_boxes()
-            
-            # リストをクリア
-            self.annotation_list.clear()
+            # 画像形式のバリエーションを試す
+            for ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+                base_path = os.path.splitext(point_cloud_file)[0]
+                alt_image_file = f"{base_path}{ext}"
+                if os.path.exists(alt_image_file):
+                    image = load_image(alt_image_file)
+                    if image:
+                        self.image_viewer.load_image(image)
+                        self.statusBar.showMessage(f"Loaded image from: {alt_image_file}", 3000)
+                        break
         
-        # マルチビューも更新
-        self._update_multi_views()
+        # アノテーションを読み込み
+        self._load_annotation()
         
-        self.statusBar.showMessage(f"Loaded frame {current_frame_id} - '{file_name}'")
+        # 現在のファイルパスを更新
+        self.current_file_path = point_cloud_file
+        
+        # 明示的に座標変換を適用（初期表示時のずれを修正）
+        self.point_cloud_viewer.apply_rotation()
+        self.point_cloud_viewer.transform_bounding_boxes()
+        
+        # アノテーションを表示
+        self._display_all_annotations()
+        
+        # フレームコントロールを更新
+        self._update_frame_controls()
+        
         return True
     
     def _update_frame_controls(self):
@@ -479,10 +493,10 @@ class MainWindow(QMainWindow):
         properties_layout = QFormLayout()
         
         # クラス選択
-        self.class_combo = QComboBox()
+        self.class_combobox = QComboBox()
         self._update_class_combo()
-        properties_layout.addRow("Class:", self.class_combo)
-        self.class_combo.currentIndexChanged.connect(self._on_class_changed)
+        properties_layout.addRow("Class:", self.class_combobox)
+        self.class_combobox.currentIndexChanged.connect(self._on_class_changed)
         
         # 寸法と位置の編集
         position_group = QGroupBox("Position")
@@ -491,19 +505,19 @@ class MainWindow(QMainWindow):
         self.pos_x = QDoubleSpinBox()
         self.pos_x.setRange(-1000, 1000)
         self.pos_x.setSingleStep(0.1)
-        self.pos_x.valueChanged.connect(lambda: self._update_bbox_property("center", 0))
+        self.pos_x.valueChanged.connect(lambda: self._update_bbox_property("position"))
         position_layout.addRow("X:", self.pos_x)
         
         self.pos_y = QDoubleSpinBox()
         self.pos_y.setRange(-1000, 1000)
         self.pos_y.setSingleStep(0.1)
-        self.pos_y.valueChanged.connect(lambda: self._update_bbox_property("center", 1))
+        self.pos_y.valueChanged.connect(lambda: self._update_bbox_property("position"))
         position_layout.addRow("Y:", self.pos_y)
         
         self.pos_z = QDoubleSpinBox()
         self.pos_z.setRange(-1000, 1000)
         self.pos_z.setSingleStep(0.1)
-        self.pos_z.valueChanged.connect(lambda: self._update_bbox_property("center", 2))
+        self.pos_z.valueChanged.connect(lambda: self._update_bbox_property("position"))
         position_layout.addRow("Z:", self.pos_z)
         
         position_group.setLayout(position_layout)
@@ -516,19 +530,19 @@ class MainWindow(QMainWindow):
         self.size_x = QDoubleSpinBox()
         self.size_x.setRange(0.1, 100)
         self.size_x.setSingleStep(0.1)
-        self.size_x.valueChanged.connect(lambda: self._update_bbox_property("size", 0))
+        self.size_x.valueChanged.connect(lambda: self._update_bbox_property("size"))
         size_layout.addRow("Width:", self.size_x)
         
         self.size_y = QDoubleSpinBox()
         self.size_y.setRange(0.1, 100)
         self.size_y.setSingleStep(0.1)
-        self.size_y.valueChanged.connect(lambda: self._update_bbox_property("size", 1))
+        self.size_y.valueChanged.connect(lambda: self._update_bbox_property("size"))
         size_layout.addRow("Length:", self.size_y)
         
         self.size_z = QDoubleSpinBox()
         self.size_z.setRange(0.1, 100)
         self.size_z.setSingleStep(0.1)
-        self.size_z.valueChanged.connect(lambda: self._update_bbox_property("size", 2))
+        self.size_z.valueChanged.connect(lambda: self._update_bbox_property("size"))
         size_layout.addRow("Height:", self.size_z)
         
         size_group.setLayout(size_layout)
@@ -541,19 +555,19 @@ class MainWindow(QMainWindow):
         self.rot_x = QDoubleSpinBox()
         self.rot_x.setRange(-180, 180)
         self.rot_x.setSingleStep(1)
-        self.rot_x.valueChanged.connect(lambda: self._update_bbox_property("rotation", 0))
+        self.rot_x.valueChanged.connect(lambda: self._update_bbox_property("rotation"))
         rotation_layout.addRow("X-axis:", self.rot_x)
         
         self.rot_y = QDoubleSpinBox()
         self.rot_y.setRange(-180, 180)
         self.rot_y.setSingleStep(1)
-        self.rot_y.valueChanged.connect(lambda: self._update_bbox_property("rotation", 1))
+        self.rot_y.valueChanged.connect(lambda: self._update_bbox_property("rotation"))
         rotation_layout.addRow("Y-axis:", self.rot_y)
         
         self.rot_z = QDoubleSpinBox()
         self.rot_z.setRange(-180, 180)
         self.rot_z.setSingleStep(1)
-        self.rot_z.valueChanged.connect(lambda: self._update_bbox_property("rotation", 2))
+        self.rot_z.valueChanged.connect(lambda: self._update_bbox_property("rotation"))
         rotation_layout.addRow("Z-axis:", self.rot_z)
         
         rotation_group.setLayout(rotation_layout)
@@ -569,7 +583,7 @@ class MainWindow(QMainWindow):
     
     def _set_properties_enabled(self, enabled):
         """プロパティ編集の有効/無効を切り替え"""
-        self.class_combo.setEnabled(enabled)
+        self.class_combobox.setEnabled(enabled)
         self.pos_x.setEnabled(enabled)
         self.pos_y.setEnabled(enabled)
         self.pos_z.setEnabled(enabled)
@@ -599,10 +613,10 @@ class MainWindow(QMainWindow):
     
     def _update_class_combo(self):
         """クラス選択コンボボックスを更新"""
-        self.class_combo.clear()
+        self.class_combobox.clear()
         
         for class_label in self.class_manager.get_all_classes():
-            self.class_combo.addItem(class_label.label, class_label.id)
+            self.class_combobox.addItem(class_label.label, class_label.id)
     
     def _update_annotation_list(self):
         """アノテーションリストを更新"""
@@ -619,9 +633,9 @@ class MainWindow(QMainWindow):
         self._block_property_signals(True)
         
         # クラスの設定
-        index = self.class_combo.findData(bbox.class_id)
+        index = self.class_combobox.findData(bbox.class_id)
         if index >= 0:
-            self.class_combo.setCurrentIndex(index)
+            self.class_combobox.setCurrentIndex(index)
         
         # 位置の設定
         self.pos_x.setValue(bbox.center[0])
@@ -643,7 +657,7 @@ class MainWindow(QMainWindow):
     
     def _block_property_signals(self, block):
         """プロパティフィールドのシグナルをブロック/アンブロック"""
-        self.class_combo.blockSignals(block)
+        self.class_combobox.blockSignals(block)
         self.pos_x.blockSignals(block)
         self.pos_y.blockSignals(block)
         self.pos_z.blockSignals(block)
@@ -656,85 +670,123 @@ class MainWindow(QMainWindow):
     
     def _open_point_cloud(self):
         """点群ファイルを開く"""
-        # 前回開いたディレクトリを記憶
-        last_dir = getattr(self, 'last_open_dir', None)
-        if not last_dir:
-            last_dir = QDir.homePath()
-        
-        # ファイル選択ダイアログ
+        # ファイル選択ダイアログを表示
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Point Cloud File",
-            last_dir,
-            "Point Cloud Files (*.pcd *.npy)"
+            "",
+            "Point Cloud Files (*.pcd *.ply *.npy);;All Files (*)"
         )
         
         if not file_path:
             return
         
-        # ディレクトリを記憶
-        self.last_open_dir = os.path.dirname(file_path)
+        # 現在のフレーム管理をクリア
+        self.frame_manager.clear()
         
-        # 座標変換の状態を表示
-        transform_status = "enabled" if is_transform_enabled() else "disabled"
-        self.statusBar.showMessage(f"Loading point cloud file... Coordinate transform: {transform_status}")
-        
-        # 点群データを読み込み
+        # 点群を読み込み
         self.point_cloud_xyz, self.point_cloud = load_point_cloud(file_path)
         
         if self.point_cloud_xyz is None:
+            error_msg = f"Failed to load point cloud file: {file_path}"
             QMessageBox.critical(
                 self,
                 "Load Error",
-                f"Failed to load point cloud file: {file_path}"
+                error_msg
             )
             return
         
         # ビューアに点群をセット
         if not self.point_cloud_viewer.load_point_cloud(self.point_cloud, self.point_cloud_xyz):
-            QMessageBox.critical(self, "Error", "Failed to display point cloud.")
+            error_msg = "Failed to display point cloud in viewer."
+            QMessageBox.critical(
+                self,
+                "Display Error",
+                error_msg
+            )
             return
         
-        # 現在のファイルパスを保存
-        self.current_file_path = file_path
-        file_name = os.path.basename(file_path)
-        self.setWindowTitle(f"3D Annotation Tool - {file_name}")
+        # 画像ファイルを読み込み
+        image_file = get_image_file_path(file_path)
+        if image_file and os.path.exists(image_file):
+            image = load_image(image_file)
+            if image:
+                self.image_viewer.load_image(image)
+                self.statusBar.showMessage(f"Loaded image from: {image_file}", 3000)
+        else:
+            # 画像形式のバリエーションを試す
+            for ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+                base_path = os.path.splitext(file_path)[0]
+                alt_image_file = f"{base_path}{ext}"
+                if os.path.exists(alt_image_file):
+                    image = load_image(alt_image_file)
+                    if image:
+                        self.image_viewer.load_image(image)
+                        self.statusBar.showMessage(f"Loaded image from: {alt_image_file}", 3000)
+                        break
         
-        # 状態を更新
-        self.point_cloud = self.point_cloud
-        self.point_cloud_xyz = self.point_cloud_xyz
+        # アノテーションマネージャを初期化
+        self.annotation_manager = AnnotationManager()
+        
+        # アノテーションファイルを読み込み
+        annotation_file = self._get_annotation_file_path(file_path)
+        if os.path.exists(annotation_file):
+            with open(annotation_file, 'r') as f:
+                try:
+                    annotation_data = json.load(f)
+                    
+                    # アノテーションデータを処理
+                    if isinstance(annotation_data, list):
+                        for bbox_data in annotation_data:
+                            bbox = BoundingBox3D.from_dict(bbox_data)
+                            self.annotation_manager.add_annotation(bbox)
+                        
+                        # アノテーションを表示
+                        self._display_all_annotations()
+                        
+                        self.statusBar.showMessage(f"Loaded {len(annotation_data)} annotations from: {annotation_file}", 3000)
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        "Annotation Load Warning",
+                        f"Failed to load annotation file: {str(e)}"
+                    )
+        
+        # 現在のファイルパスを更新
+        self.current_file_path = file_path
+        
+        # アノテーションリストを更新
+        self._update_annotation_list()
+        
+        # タイムラインコントロールを無効化（単一ファイルモード）
+        self.prev_frame_button.setEnabled(False)
+        self.next_frame_button.setEnabled(False)
+        self.goto_frame_button.setEnabled(False)
+        self.propagate_button.setEnabled(False)
+        
+        # フレーム表示を更新
+        self.frame_label.setText("Single File Mode")
         
         # マルチビューも更新
         self._update_multi_views()
         
-        # 対応するアノテーションファイルをチェック
-        annotation_file = self._get_annotation_file_path(file_path)
-        if os.path.exists(annotation_file):
-            # アノテーションファイルが存在する場合は読み込む
-            self.annotation_manager = AnnotationManager.load_from_file(annotation_file)
-            
-            # ビューアにアノテーションを表示
-            self._display_all_annotations()
-            
-            # リストを更新
-            self._update_annotation_list()
-        else:
-            # 新しいアノテーションマネージャを作成
-            self.annotation_manager = AnnotationManager()
-            
-            # ビューアのアノテーションをクリア
-            self.point_cloud_viewer.clear_all_bounding_boxes()
-            
-            # リストをクリア
-            self.annotation_list.clear()
-        
-        self.statusBar.showMessage(f"Loaded point cloud file '{file_name}'")
+        self.statusBar.showMessage(f"Loaded point cloud from: {file_path}")
     
     def _get_annotation_file_path(self, point_cloud_file):
         """点群ファイルに対応するアノテーションファイルのパスを取得"""
         dir_path = os.path.dirname(point_cloud_file)
         file_name = os.path.splitext(os.path.basename(point_cloud_file))[0]
-        return os.path.join(dir_path, f"{file_name}_annotation.json")
+        
+        # ファイル名付きのアノテーションファイルを確認
+        specific_annotation_file = os.path.join(dir_path, f"{file_name}_annotations.json")
+        
+        if os.path.exists(specific_annotation_file):
+            return specific_annotation_file
+            
+        # 標準のアノテーションファイル
+        standard_annotation_file = os.path.join(dir_path, "annotations.json")
+        
+        return standard_annotation_file
     
     def _save_annotation(self):
         """アノテーションを保存"""
@@ -742,7 +794,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "No point cloud file is loaded.")
             return
         
-        annotation_file = self._get_annotation_file_path(self.current_file_path)
+        # フレームシーケンスからアノテーションファイルのパスを取得
+        if self.frame_manager.get_current_frame_id():
+            annotation_file = self.frame_manager.get_annotation_file_path()
+        else:
+            # 単一ファイルの場合は直接パスを計算
+            annotation_file = self._get_annotation_file_path(self.current_file_path)
+        
+        # フレームIDを設定（フレームシーケンスの場合のみ）
+        if self.frame_manager.get_current_frame_id():
+            self.annotation_manager.set_frame_id(self.frame_manager.get_current_frame_id())
         
         if self.annotation_manager.save_to_file(annotation_file):
             self.statusBar.showMessage(f"Saved annotations to '{annotation_file}'")
@@ -755,84 +816,97 @@ class MainWindow(QMainWindow):
         self.point_cloud_viewer.clear_all_bounding_boxes()
         
         # すべてのアノテーションを表示
-        for bbox in self.annotation_manager.get_all_annotations():
+        annotations = self.annotation_manager.get_all_annotations()
+        
+        for bbox in annotations:
             self.point_cloud_viewer.add_bounding_box(bbox)
+        
+        # 明示的に座標変換を適用（初期表示時のずれを修正）
+        self.point_cloud_viewer.apply_rotation()
+        self.point_cloud_viewer.transform_bounding_boxes()
         
         # マルチビューも更新
         self._update_multi_views()
     
     def _add_new_box(self):
         """新しいバウンディングボックスを追加"""
-        if self.point_cloud is None:
-            QMessageBox.warning(self, "Warning", "No point cloud is loaded.")
+        # 点群データがロードされていなければ処理しない
+        if self.point_cloud_xyz is None:
+            QMessageBox.warning(self, "Warning", "No point cloud data is loaded.")
             return
         
-        # デフォルトのクラス情報を取得
-        default_class = self.class_manager.get_all_classes()[0]
+        # デフォルトの新規ボックスのサイズ
+        default_size = [1.0, 1.0, 1.0]
         
-        # デフォルトの中心位置を計算（点群の中心）
-        point_cloud_center = np.mean(self.point_cloud_xyz, axis=0).tolist()
+        # 中心点（ビューアのカメラの前方に配置）
+        camera_position = self.point_cloud_viewer.get_camera_position()
+        camera_direction = self.point_cloud_viewer.get_camera_direction()
+        
+        # カメラの前方に新しいボックスを配置
+        center = camera_position + camera_direction * 3.0
+        
+        # 選択しているクラスを取得
+        class_id = self.class_combobox.currentData()
+        if class_id is None and self.class_combobox.count() > 0:
+            class_id = self.class_combobox.itemData(0)  # 最初のクラス
+        
+        selected_class = self.class_manager.get_class(class_id)
+        
+        if not selected_class and self.class_manager.get_all_classes():
+            # クラスが見つからなければ、最初のクラスを使用
+            selected_class = self.class_manager.get_all_classes()[0]
+        
+        if not selected_class:
+            QMessageBox.warning(self, "Warning", "No class labels available. Please add class labels first.")
+            return
         
         # 新しいバウンディングボックスを作成
-        bbox = BoundingBox3D(
-            center=point_cloud_center,
-            size=[2.0, 4.0, 1.5],  # デフォルトサイズ
-            rotation=[0.0, 0.0, 0.0],
-            class_id=default_class.id,
-            class_label=default_class.label,
-            class_color=default_class.color
+        new_bbox = BoundingBox3D(
+            center=center.tolist(),
+            size=default_size,
+            rotation=[0, 0, 0],
+            class_id=selected_class.id,
+            class_label=selected_class.label,
+            class_color=selected_class.color
         )
         
-        # アノテーションマネージャに追加
-        bbox_id = self.annotation_manager.add_annotation(bbox)
+        # アノテーションマネージャーに追加
+        bbox_id = self.annotation_manager.add_annotation(new_bbox)
         
-        # ビューアに表示
-        self.point_cloud_viewer.add_bounding_box(bbox)
+        # 表示を更新
+        self.point_cloud_viewer.add_bounding_box(new_bbox)
+        self.point_cloud_viewer.select_bounding_box(bbox_id)
+        
+        # マルチビューを更新
+        self._update_multi_views()
         
         # リストを更新
         self._update_annotation_list()
         
-        # 作成したボックスを選択
-        self.point_cloud_viewer.select_bounding_box(bbox_id)
+        # プロパティ編集を有効化
+        self._set_properties_enabled(True)
         
-        # リストでも選択
-        for i in range(self.annotation_list.count()):
-            item = self.annotation_list.item(i)
-            if item.data(Qt.UserRole) == bbox_id:
-                self.annotation_list.setCurrentItem(item)
-                break
+        # プロパティフィールドを更新
+        self._update_property_fields(new_bbox)
         
-        self.statusBar.showMessage(f"Created new bounding box (ID: {bbox_id[:8]}...)")
+        self.statusBar.showMessage(f"新しいバウンディングボックスを作成しました (ID: {bbox_id[:8]}...)")
     
     def _delete_selected_box(self):
-        """選択されたバウンディングボックスを削除"""
-        selected_id = None
-        
-        # リストから選択されたアイテムがあればそのIDを取得
-        selected_items = self.annotation_list.selectedItems()
-        if selected_items:
-            selected_id = selected_items[0].data(Qt.UserRole)
-        # リストで選択されていない場合はビューアの選択を使用
-        elif self.point_cloud_viewer.selected_box_id:
-            selected_id = self.point_cloud_viewer.selected_box_id
-        
-        if not selected_id:
-            QMessageBox.warning(self, "Warning", "No bounding box is selected to delete.")
+        """選択中のバウンディングボックスを削除"""
+        if not self.point_cloud_viewer.has_selected_box():
+            QMessageBox.warning(self, "Warning", "No bounding box is selected.")
             return
         
-        # 削除の確認
-        reply = QMessageBox.question(
-            self, "Confirm", f"Delete selected bounding box (ID: {selected_id[:8]}...)?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
+        # 選択中のボックスIDを取得
+        box_id = self.point_cloud_viewer.get_selected_box_id()
         
-        if reply != QMessageBox.Yes:
-            return
-        
-        # マネージャから削除
-        if self.annotation_manager.remove_annotation(selected_id):
-            # ビューアからも削除
-            self.point_cloud_viewer.remove_bounding_box(selected_id)
+        # アノテーションマネージャから削除
+        if self.annotation_manager.remove_annotation(box_id):
+            # ビューアから削除
+            self.point_cloud_viewer.remove_bounding_box(box_id)
+            
+            # マルチビューを更新
+            self._update_multi_views()
             
             # リストを更新
             self._update_annotation_list()
@@ -840,12 +914,9 @@ class MainWindow(QMainWindow):
             # プロパティ編集を無効化
             self._set_properties_enabled(False)
             
-            # マルチビューも更新
-            self._update_multi_views()
-            
-            self.statusBar.showMessage(f"Deleted bounding box (ID: {selected_id[:8]}...)")
+            self.statusBar.showMessage(f"バウンディングボックスを削除しました (ID: {box_id[:8]}...)")
         else:
-            QMessageBox.critical(self, "Error", f"Failed to delete bounding box (ID: {selected_id[:8]}...)")
+            self.statusBar.showMessage(f"バウンディングボックスの削除に失敗しました (ID: {box_id[:8]}...)")
     
     def _on_bbox_selected(self, bbox_id):
         """バウンディングボックスが選択されたときの処理"""
@@ -899,8 +970,8 @@ class MainWindow(QMainWindow):
             return
         
         # 選択されたクラスIDを取得
-        class_id = self.class_combo.itemData(index)
-        class_label = self.class_combo.itemText(index)
+        class_id = self.class_combobox.itemData(index)
+        class_label = self.class_combobox.itemText(index)
         
         # クラスの色を取得
         class_obj = self.class_manager.get_class(class_id)
@@ -929,51 +1000,53 @@ class MainWindow(QMainWindow):
             
             self.statusBar.showMessage(f"Changed bounding box class to '{class_label}'")
     
-    def _update_bbox_property(self, property_name, index):
+    def _update_bbox_property(self, property_name):
         """バウンディングボックスのプロパティを更新"""
-        if self.point_cloud_viewer.selected_box_id is None:
+        if not self.point_cloud_viewer.has_selected_box():
             return
         
-        bbox_id = self.point_cloud_viewer.selected_box_id
-        bbox = self.annotation_manager.get_annotation(bbox_id)
-        if not bbox:
-            return
+        # 選択中のボックスIDを取得
+        box_id = self.point_cloud_viewer.get_selected_box_id()
+        bbox = self.annotation_manager.get_annotation(box_id)
         
-        # 現在の値を取得
-        values = getattr(bbox, property_name).copy()
+        # 更新データを辞書として作成
+        update_data = {}
         
-        # 新しい値を設定
-        if property_name == "center":
-            values[index] = self.pos_x.value() if index == 0 else (
-                self.pos_y.value() if index == 1 else self.pos_z.value()
-            )
+        if property_name == "position":
+            # 位置を更新
+            update_data["center"] = [
+                self.pos_x.value(),
+                self.pos_y.value(),
+                self.pos_z.value()
+            ]
+        
         elif property_name == "size":
-            values[index] = self.size_x.value() if index == 0 else (
-                self.size_y.value() if index == 1 else self.size_z.value()
-            )
+            # サイズを更新
+            update_data["size"] = [
+                self.size_x.value(),
+                self.size_y.value(),
+                self.size_z.value()
+            ]
+        
         elif property_name == "rotation":
-            values[index] = self.rot_x.value() if index == 0 else (
-                self.rot_y.value() if index == 1 else self.rot_z.value()
-            )
+            # 回転を更新
+            update_data["rotation"] = [
+                self.rot_x.value(),
+                self.rot_y.value(),
+                self.rot_z.value()
+            ]
         
-        # 更新データを作成
-        update_data = {property_name: values}
+        # アノテーションマネージャを更新（辞書データを渡す）
+        self.annotation_manager.update_annotation(box_id, update_data)
         
-        # バウンディングボックスを更新
-        if self.annotation_manager.update_annotation(bbox_id, update_data):
-            # ビューアも更新
-            bbox = self.annotation_manager.get_annotation(bbox_id)
-            self.point_cloud_viewer.update_bounding_box(bbox)
-            
-            # マルチビューも更新
-            self._update_multi_views()
-            
-            property_labels = {
-                "center": "position",
-                "size": "size",
-                "rotation": "rotation"
-            }
-            self.statusBar.showMessage(f"Updated bounding box {property_labels[property_name]}")
+        # 更新されたボックスを取得
+        updated_bbox = self.annotation_manager.get_annotation(box_id)
+        
+        # ビューアの表示を更新
+        self.point_cloud_viewer.update_bounding_box(updated_bbox)
+        
+        # マルチビューも更新
+        self._update_multi_views()
     
     def _undo(self):
         """操作を元に戻す"""
@@ -1009,13 +1082,12 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """ウィンドウが閉じられるときの処理"""
-        # ビューアを閉じる
+        # 各ビューアを閉じる
         self.point_cloud_viewer.close_viewer()
-        
-        # マルチビューも閉じる
         self.top_view.close_viewer()
         self.front_view.close_viewer()
         self.side_view.close_viewer()
+        self.image_viewer.clear()
         
         event.accept()
 
@@ -1051,7 +1123,7 @@ class MainWindow(QMainWindow):
         self.top_view.sync_from_main_viewer(self.point_cloud_viewer)
         self.front_view.sync_from_main_viewer(self.point_cloud_viewer)
         self.side_view.sync_from_main_viewer(self.point_cloud_viewer)
-
+    
     def _toggle_coordinate_transform(self, state):
         """座標変換の有効/無効を切り替える"""
         enabled = state == Qt.Checked
@@ -1063,3 +1135,58 @@ class MainWindow(QMainWindow):
         
         # チェックボックスの状態を更新
         self.transform_checkbox.setChecked(is_transform_enabled()) 
+
+    def _load_annotation(self):
+        """現在のフレームのアノテーションを読み込む"""
+        # アノテーションファイルのパスを取得
+        if self.frame_manager.get_current_frame_id():
+            # フレームシーケンスモードの場合
+            annotation_file = self.frame_manager.get_annotation_file_path()
+        else:
+            # 単一ファイルモードの場合
+            if not self.current_file_path:
+                return
+            annotation_file = self._get_annotation_file_path(self.current_file_path)
+        
+        # アノテーションファイルが存在するか確認
+        if not os.path.exists(annotation_file):
+            # ファイルが存在しない場合は新しいアノテーションマネージャを作成
+            current_frame_id = self.frame_manager.get_current_frame_id() or ""
+            self.annotation_manager = AnnotationManager(frame_id=current_frame_id)
+            return
+        
+        # アノテーションファイルを読み込み
+        try:
+            with open(annotation_file, 'r') as f:
+                annotation_data = json.load(f)
+            
+            # アノテーションマネージャを初期化
+            current_frame_id = self.frame_manager.get_current_frame_id() or ""
+            self.annotation_manager = AnnotationManager(frame_id=current_frame_id)
+            
+            # アノテーションデータを処理
+            if isinstance(annotation_data, list):
+                for i, bbox_data in enumerate(annotation_data):
+                    bbox = BoundingBox3D.from_dict(bbox_data)
+                    self.annotation_manager.add_annotation(bbox)
+                
+                self.statusBar.showMessage(f"Loaded {len(annotation_data)} annotations from: {annotation_file}", 3000)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Annotation Load Warning",
+                    "Annotation data is not in the expected format."
+                )
+        except Exception as e:
+            error_message = f"Failed to load annotation file: {str(e)}"
+            QMessageBox.warning(
+                self,
+                "Annotation Load Warning",
+                error_message
+            )
+            # エラーの場合は新しいアノテーションマネージャを作成
+            current_frame_id = self.frame_manager.get_current_frame_id() or ""
+            self.annotation_manager = AnnotationManager(frame_id=current_frame_id)
+        
+        # アノテーションリストを更新
+        self._update_annotation_list() 

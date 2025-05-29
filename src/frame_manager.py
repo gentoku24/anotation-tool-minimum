@@ -243,4 +243,13 @@ class FrameManager:
             return True
         except Exception as e:
             print(f"インポートエラー: {e}")
-            return False 
+            return False
+    
+    def clear(self) -> None:
+        """
+        内部状態をリセットする
+        """
+        self.frames = {}
+        self.current_frame_id = None
+        self.frame_sequence = []
+        # プロジェクトルートは保持する 

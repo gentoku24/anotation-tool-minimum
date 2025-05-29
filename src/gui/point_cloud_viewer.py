@@ -6,11 +6,12 @@ from PySide6.QtGui import QColor, QPainter, QPen, QFont
 import sys
 import os
 import math
+from typing import Optional
 
 # 親ディレクトリをパスに追加
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import BoundingBox3D, ClassLabel
+from src.models import BoundingBox3D, ClassLabel
 
 class PointCloudViewer(QWidget):
     # シグナル定義
@@ -26,7 +27,7 @@ class PointCloudViewer(QWidget):
         self.setLayout(self.layout)
         
         # 描画用の情報ラベル
-        self.info_label = QLabel("点群データと3Dバウンディングボックスの描画領域")
+        self.info_label = QLabel("")
         self.info_label.setAlignment(Qt.AlignCenter)
         self.layout.addWidget(self.info_label)
         
@@ -82,7 +83,7 @@ class PointCloudViewer(QWidget):
             font = QFont()
             font.setPointSize(14)
             painter.setFont(font)
-            painter.drawText(event.rect(), Qt.AlignCenter, "点群データがありません\n「点群を開く」ボタンからデータを読み込んでください")
+            painter.drawText(event.rect(), Qt.AlignCenter, "No point cloud data\nPlease load data using 'Open Point Cloud' button")
             return
         
         # 点群の数を表示
@@ -90,8 +91,8 @@ class PointCloudViewer(QWidget):
         font = QFont()
         font.setPointSize(10)
         painter.setFont(font)
-        painter.drawText(10, 20, f"点群データ: {len(self.point_cloud_xyz)}点")
-        painter.drawText(10, 40, f"回転角度: X={math.degrees(self.rotation_x):.1f}°, Y={math.degrees(self.rotation_y):.1f}°, Z={math.degrees(self.rotation_z):.1f}°")
+        painter.drawText(10, 20, f"Point Cloud: {len(self.point_cloud_xyz)} points")
+        painter.drawText(10, 40, f"Rotation: X={math.degrees(self.rotation_x):.1f}°, Y={math.degrees(self.rotation_y):.1f}°, Z={math.degrees(self.rotation_z):.1f}°")
         
         if self.transformed_points is not None:
             points = self.transformed_points
@@ -154,20 +155,25 @@ class PointCloudViewer(QWidget):
                                         screen_vertices[i+4][0], screen_vertices[i+4][1])
         
         # バウンディングボックス情報
+        self.paint_overlay(painter)
+
+    def paint_overlay(self, painter: QPainter, event=None):
+        """オーバーレイの描画"""
+        # バウンディングボックス情報
         y_pos = 60
         for bbox_id, bbox in self.bounding_boxes.items():
             color = QColor(*bbox.class_color)
             is_selected = bbox_id == self.selected_box_id
             
             if is_selected:
-                # 選択されたボックスは太字で
-                painter.setPen(QPen(color, 2))
-                font.setBold(True)
+                # 選択中のバウンディングボックスは明るく表示
+                text = f"> {bbox.class_label} ({bbox_id[:8]}...): {bbox.center}"
+                color = color.lighter(130)  # 明るくする
             else:
-                painter.setPen(QPen(color))
-                font.setBold(False)
-            painter.setFont(font)
-            painter.drawText(10, y_pos, f"{bbox.class_label}: {bbox.center} サイズ: {bbox.size}")
+                text = f"  {bbox.class_label} ({bbox_id[:8]}...): {bbox.center}"
+            
+            painter.setPen(QPen(color, 2))
+            painter.drawText(10, y_pos, text)
             y_pos += 20
 
     def apply_rotation(self):
@@ -210,70 +216,74 @@ class PointCloudViewer(QWidget):
         self.update()
 
     def transform_bounding_boxes(self):
-        """バウンディングボックスに回転を適用"""
+        """すべてのバウンディングボックスに変換を適用"""
         self.transformed_boxes = {}
         
         for bbox_id, bbox in self.bounding_boxes.items():
             # バウンディングボックスの8つの頂点を計算
             center = np.array(bbox.center)
-            size = np.array(bbox.size) / 2  # 中心からの距離なので半分
+            size = np.array(bbox.size)
+            rotation = np.array(bbox.rotation)
             
-            # バウンディングボックス自体の回転（ラジアンに変換）
-            box_rotation = np.array(bbox.rotation) * (np.pi / 180.0)
+            # バウンディングボックスの点を変換
+            transformed_points = self._transform_bbox_points(center, size, rotation)
             
-            # バウンディングボックスのローカル回転行列を作成
-            # X軸周りの回転
-            rx_matrix = np.array([
-                [1, 0, 0],
-                [0, np.cos(box_rotation[0]), -np.sin(box_rotation[0])],
-                [0, np.sin(box_rotation[0]), np.cos(box_rotation[0])]
-            ])
-            
-            # Y軸周りの回転
-            ry_matrix = np.array([
-                [np.cos(box_rotation[1]), 0, np.sin(box_rotation[1])],
-                [0, 1, 0],
-                [-np.sin(box_rotation[1]), 0, np.cos(box_rotation[1])]
-            ])
-            
-            # Z軸周りの回転
-            rz_matrix = np.array([
-                [np.cos(box_rotation[2]), -np.sin(box_rotation[2]), 0],
-                [np.sin(box_rotation[2]), np.cos(box_rotation[2]), 0],
-                [0, 0, 1]
-            ])
-            
-            # 回転行列を合成（Z→Y→Xの順に適用）
-            box_rotation_matrix = rx_matrix @ ry_matrix @ rz_matrix
-            
-            # 頂点の順序を明示的に定義（立方体の8つの頂点）
-            # 順序: [左下前, 右下前, 右上前, 左上前, 左下後, 右下後, 右上後, 左上後]
-            corners = [
-                [-1, -1, -1],  # 左下前
-                [1, -1, -1],   # 右下前
-                [1, 1, -1],    # 右上前
-                [-1, 1, -1],   # 左上前
-                [-1, -1, 1],   # 左下後
-                [1, -1, 1],    # 右下後
-                [1, 1, 1],     # 右上後
-                [-1, 1, 1]     # 左上後
-            ]
-            
-            # 8つの頂点の座標を計算（回転を含む）
-            vertices = []
-            for corner in corners:
-                # サイズに合わせて拡大
-                local_offset = np.array([corner[0] * size[0], corner[1] * size[1], corner[2] * size[2]])
-                # ボックスの回転を適用
-                rotated_offset = local_offset @ box_rotation_matrix.T
-                # 中心位置を加算
-                vertices.append(center + rotated_offset)
-            
-            # ビューワーの回転を適用
-            transformed_vertices = np.array(vertices) @ self.current_rotation_matrix.T
-            
-            # 変換後の頂点を保存
-            self.transformed_boxes[bbox_id] = transformed_vertices
+            # 変換した頂点を保存
+            self.transformed_boxes[bbox_id] = transformed_points
+
+    def _transform_bbox_points(self, center, size, rotation):
+        # バウンディングボックスのローカル回転行列を作成
+        # X軸周りの回転
+        rx_matrix = np.array([
+            [1, 0, 0],
+            [0, np.cos(rotation[0]), -np.sin(rotation[0])],
+            [0, np.sin(rotation[0]), np.cos(rotation[0])]
+        ])
+        
+        # Y軸周りの回転
+        ry_matrix = np.array([
+            [np.cos(rotation[1]), 0, np.sin(rotation[1])],
+            [0, 1, 0],
+            [-np.sin(rotation[1]), 0, np.cos(rotation[1])]
+        ])
+        
+        # Z軸周りの回転
+        rz_matrix = np.array([
+            [np.cos(rotation[2]), -np.sin(rotation[2]), 0],
+            [np.sin(rotation[2]), np.cos(rotation[2]), 0],
+            [0, 0, 1]
+        ])
+        
+        # 回転行列を合成（Z→Y→Xの順に適用）
+        rotation_matrix = rx_matrix @ ry_matrix @ rz_matrix
+        
+        # 頂点の順序を明示的に定義（立方体の8つの頂点）
+        # 順序: [左下前, 右下前, 右上前, 左上前, 左下後, 右下後, 右上後, 左上後]
+        corners = [
+            [-1, -1, -1],  # 左下前
+            [1, -1, -1],   # 右下前
+            [1, 1, -1],    # 右上前
+            [-1, 1, -1],   # 左上前
+            [-1, -1, 1],   # 左下後
+            [1, -1, 1],    # 右下後
+            [1, 1, 1],     # 右上後
+            [-1, 1, 1]     # 左上後
+        ]
+        
+        # 8つの頂点の座標を計算（回転を含む）
+        vertices = []
+        for corner in corners:
+            # サイズに合わせて拡大
+            local_offset = np.array([corner[0] * size[0], corner[1] * size[1], corner[2] * size[2]])
+            # ボックスの回転を適用
+            rotated_offset = local_offset @ rotation_matrix.T
+            # 中心位置を加算
+            vertices.append(center + rotated_offset)
+        
+        # ビューワーの回転を適用
+        transformed_vertices = np.array(vertices) @ self.current_rotation_matrix.T
+        
+        return transformed_vertices
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -349,9 +359,8 @@ class PointCloudViewer(QWidget):
             self.update()
             return True
         except Exception as e:
-            print(f"バウンディングボックス追加エラー: {e}")
             return False
-    
+
     def remove_bounding_box(self, bbox_id: str) -> bool:
         """バウンディングボックスを削除"""
         if bbox_id not in self.bounding_boxes:
@@ -362,18 +371,17 @@ class PointCloudViewer(QWidget):
             del self.bounding_boxes[bbox_id]
             if bbox_id in self.transformed_boxes:
                 del self.transformed_boxes[bbox_id]
-            
+                
             # 選択状態をクリア
             if self.selected_box_id == bbox_id:
                 self.selected_box_id = None
-            
+                
             # 再描画
             self.update()
             return True
         except Exception as e:
-            print(f"バウンディングボックス削除エラー: {e}")
             return False
-    
+
     def select_bounding_box(self, bbox_id: str) -> bool:
         """バウンディングボックスを選択"""
         if bbox_id not in self.bounding_boxes:
@@ -401,7 +409,7 @@ class PointCloudViewer(QWidget):
         # 再描画
         self.update()
     
-    def get_bounding_box(self, bbox_id: str) -> BoundingBox3D:
+    def get_bbox(self, bbox_id: str) -> Optional[BoundingBox3D]:
         """指定IDのバウンディングボックスを取得"""
         if bbox_id in self.bounding_boxes:
             return self.bounding_boxes[bbox_id]
@@ -416,3 +424,47 @@ class PointCloudViewer(QWidget):
     def close_viewer(self):
         """ビューアを閉じる"""
         pass  # 特別な終了処理は不要
+
+    def set_selected_box(self, box_id):
+        """特定のバウンディングボックスを選択状態にする"""
+        self.selected_box_id = box_id
+        self.update()
+    
+    def has_selected_box(self):
+        """選択中のバウンディングボックスがあるか確認"""
+        return self.selected_box_id is not None
+    
+    def get_selected_box_id(self):
+        """選択中のバウンディングボックスのIDを取得"""
+        return self.selected_box_id
+    
+    def get_camera_position(self):
+        """カメラの位置を取得（現在の回転状態を考慮）"""
+        # 基本的なカメラ位置（回転前）
+        base_pos = np.array([0.0, 0.0, 5.0])
+        
+        # 回転行列の逆行列を計算
+        inv_rotation = np.linalg.inv(self.current_rotation_matrix)
+        
+        # 回転を適用
+        rotated_pos = base_pos @ inv_rotation
+        
+        return rotated_pos
+    
+    def get_camera_direction(self):
+        """カメラの方向ベクトルを取得（現在の回転状態を考慮）"""
+        # 基本的な視線方向（Z軸の負方向）
+        base_dir = np.array([0.0, 0.0, -1.0])
+        
+        # 回転行列の逆行列を計算
+        inv_rotation = np.linalg.inv(self.current_rotation_matrix)
+        
+        # 回転を適用
+        rotated_dir = base_dir @ inv_rotation
+        
+        # 単位ベクトル化
+        norm = np.linalg.norm(rotated_dir)
+        if norm > 0:
+            rotated_dir = rotated_dir / norm
+        
+        return rotated_dir
